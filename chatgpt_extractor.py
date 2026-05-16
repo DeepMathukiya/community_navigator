@@ -2,6 +2,9 @@ from openai import OpenAI
 from config import NVIDIA_API_KEY, NVIDIA_MODEL
 import json
 import re
+from logger_config import get_logger
+
+logger = get_logger(__name__)
 
 
 def extract_information_from_pdf(pdf_text: str) -> dict:
@@ -16,6 +19,7 @@ def extract_information_from_pdf(pdf_text: str) -> dict:
     """
     try:
         if not NVIDIA_API_KEY:
+            logger.error("NVIDIA_API_KEY not configured")
             raise Exception("NVIDIA_API_KEY not configured. Please set it in .env file")
         
         # Initialize NVIDIA API client
@@ -35,7 +39,7 @@ def extract_information_from_pdf(pdf_text: str) -> dict:
         If any information is not available in the document, use "Not mentioned" or "N/A".
         
         PDF Text:
-        {pdf_text[:4000]}  # Limit to 4000 characters to avoid token limits
+        {pdf_text}  # Limit to 4000 characters to avoid token limits
         
         Please respond ONLY with valid JSON format, no additional text.
         """
@@ -54,7 +58,6 @@ def extract_information_from_pdf(pdf_text: str) -> dict:
                 }
             ],
             temperature=0.5,
-            max_tokens=1500,
             extra_body={
                 "chat_template_kwargs": {"enable_thinking": True},
                 "reasoning_budget": 1024
@@ -63,20 +66,40 @@ def extract_information_from_pdf(pdf_text: str) -> dict:
         
         # Extract the response text
         extracted_text = completion.choices[0].message.content.strip()
+        logger.info("API response received %s", extracted_text)
         
-        # Parse JSON response
-        # Try to find JSON in the response
-        json_match = re.search(r'\{.*\}', extracted_text, re.DOTALL)
-        if json_match:
-            extracted_data = json.loads(json_match.group())
-        else:
-            extracted_data = json.loads(extracted_text)
-        
-        return extracted_data
+        # Parse JSON response robustly
+        # Try direct load first
+        try:
+            return json.loads(extracted_text)
+        except json.JSONDecodeError:
+            # Attempt to extract JSON substring
+            json_match = re.search(r'\{.*\}', extracted_text, re.DOTALL)
+            if not json_match:
+                logger.exception("No JSON object found in API response")
+                raise
+
+            json_str = json_match.group()
+
+            # Remove non-printable/control characters which can break json parsing
+            cleaned = re.sub(r'[\x00-\x1f]+', ' ', json_str)
+
+            # Remove trailing commas in objects/arrays to improve chances of parsing
+            cleaned = re.sub(r',\s*}', '}', cleaned)
+            cleaned = re.sub(r',\s*\]', ']', cleaned)
+
+            try:
+                extracted_data = json.loads(cleaned)
+                return extracted_data
+            except json.JSONDecodeError as e2:
+                logger.exception("Failed to parse cleaned JSON response")
+                raise
         
     except json.JSONDecodeError as e:
+        logger.exception("JSON decode error when parsing API response")
         raise Exception(f"Error parsing API response as JSON: {str(e)}")
     except Exception as e:
+        logger.exception("Error extracting information from PDF")
         raise Exception(f"Error extracting information from PDF: {str(e)}")
 
 
@@ -103,5 +126,5 @@ def validate_extracted_data(data: dict) -> dict:
     for field, default_value in required_fields.items():
         if field in data and data[field]:
             validated_data[field] = data[field]
-    
+    logger.debug("Validated extracted data fields: %s", ",".join(k for k in validated_data.keys()))
     return validated_data

@@ -5,6 +5,9 @@ from chatgpt_extractor import extract_information_from_pdf, validate_extracted_d
 from mongodb_handler import MongoDBHandler
 import json
 from datetime import datetime
+from logger_config import get_logger
+
+logger = get_logger(__name__)
 
 # Page configuration
 st.set_page_config(
@@ -53,6 +56,7 @@ if 'db_handler' not in st.session_state:
     except Exception as e:
         st.session_state.db_connected = False
         st.session_state.db_error = str(e)
+        logger.exception("Failed to initialize MongoDBHandler: %s", st.session_state.db_error)
 
 # Sidebar
 st.sidebar.title("📋 Navigation")
@@ -142,6 +146,7 @@ if page == "Upload & Extract":
                     # Step 4: Extract info using ChatGPT
                     st.info("🤖 Using AI to extract information...")
                     extracted_data = extract_information_from_pdf(pdf_text)
+                    # logger.info("Raw extracted data: %s", str(extracted_data)[:1000])
                     extracted_data = validate_extracted_data(extracted_data)
                     st.success("✓ Information extracted successfully!")
                     
@@ -154,6 +159,7 @@ if page == "Upload & Extract":
                     
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
+                    logger.exception("Error processing uploaded PDF: %s", getattr(uploaded_file, 'name', 'unknown'))
         
         # Display extracted data
         if 'extracted_data' in st.session_state:
@@ -216,8 +222,10 @@ if page == "Upload & Extract":
                             }
                             doc_id = st.session_state.db_handler.insert_extracted_data(db_data)
                             st.success(f"✓ Data saved to database! Document ID: {doc_id}")
+                            logger.info("Saved extracted data to DB: %s", doc_id)
                     except Exception as e:
                         st.error(f"❌ Error saving to database: {str(e)}")
+                        logger.exception("Error saving extracted data to DB for file %s", data.get('filename'))
             else:
                 st.warning("⚠️ Database not connected. Cannot save data.")
 
@@ -271,11 +279,13 @@ elif page == "View Extracted Data":
                                     st.rerun()
                             except Exception as e:
                                 st.error(f"❌ Error deleting document: {str(e)}")
+                                logger.exception("Error deleting document %s", doc.get('_id'))
             else:
                 st.info("No documents found in database.")
         
         except Exception as e:
-            st.error(f"❌ Error loading data: {str(e)}")
+                st.error(f"❌ Error loading data: {str(e)}")
+                logger.exception("Error loading data from DB")
     else:
         st.warning("⚠️ Database not connected. Cannot retrieve data.")
 
@@ -320,6 +330,7 @@ elif page == "Database Statistics":
         
         except Exception as e:
             st.error(f"❌ Error loading statistics: {str(e)}")
+            logger.exception("Error loading database statistics")
     else:
         st.warning("⚠️ Database not connected. Cannot load statistics.")
 
