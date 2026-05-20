@@ -57,7 +57,6 @@ def extract_information_from_pdf(pdf_text: str) -> dict:
                     "content": prompt
                 }
             ],
-            temperature=0.5,
             extra_body={
                 "chat_template_kwargs": {"enable_thinking": True},
             }
