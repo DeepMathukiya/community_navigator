@@ -1,8 +1,13 @@
-import streamlit as st
 import os
+# Force CPU mode globally before any torch/cuda imports
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+import streamlit as st
 from pdf_handler import save_uploaded_pdf, extract_text_from_pdf, get_pdf_info, delete_pdf_file
 from chatgpt_extractor import extract_information_from_pdf, validate_extracted_data
 from mongodb_handler import MongoDBHandler
+from milvus_handler import MilvusHandler
+from embedding_utils import get_embedding
 import json
 from datetime import datetime
 from logger_config import get_logger
@@ -57,6 +62,16 @@ if 'db_handler' not in st.session_state:
         st.session_state.db_connected = False
         st.session_state.db_error = str(e)
         logger.exception("Failed to initialize MongoDBHandler: %s", st.session_state.db_error)
+
+# Initialize Milvus handler (optional)
+if 'milvus_handler' not in st.session_state:
+    try:
+        st.session_state.milvus_handler = MilvusHandler()
+        st.session_state.milvus_connected = True
+    except Exception as e:
+        st.session_state.milvus_connected = False
+        st.session_state.milvus_error = str(e)
+        logger.warning("Milvus not available: %s", st.session_state.milvus_error)
 
 # Sidebar
 st.sidebar.title("📋 Navigation")
@@ -221,8 +236,26 @@ if page == "Upload & Extract":
                                 "extracted_info": extracted_info
                             }
                             doc_id = st.session_state.db_handler.insert_extracted_data(db_data)
-                            st.success(f"✓ Data saved to database! Document ID: {doc_id}")
-                            logger.info("Saved extracted data to DB: %s", doc_id)
+                            # make string id for external systems
+                            doc_id_str = str(doc_id)
+                            st.success(f"✓ Data saved to database! Document ID: {doc_id_str}")
+                            logger.info("Saved extracted data to DB: %s", doc_id_str)
+
+                            # Insert embedding into Milvus if available
+                            try:
+                                if st.session_state.get('milvus_connected'):
+                                    summary_text = extracted_info.get('summary', '') or ''
+                                    if summary_text:
+                                        emb = get_embedding(summary_text)
+                                        st.session_state.milvus_handler.insert_embedding(doc_id_str, summary_text, emb)
+                                        st.success("✓ Embedding inserted into Milvus")
+                                    else:
+                                        logger.info("No summary text found to create embedding for doc %s", doc_id_str)
+                                else:
+                                    logger.info("Skipping Milvus insert; Milvus not connected: %s", st.session_state.get('milvus_error'))
+                            except Exception as me:
+                                logger.exception("Failed to insert embedding into Milvus: %s", me)
+                                st.warning("Saved to DB but failed to insert embedding into Milvus")
                     except Exception as e:
                         st.error(f"❌ Error saving to database: {str(e)}")
                         logger.exception("Error saving extracted data to DB for file %s", data.get('filename'))
@@ -271,6 +304,24 @@ elif page == "View Extracted Data":
                         
                         st.write(f"**Application Process:** {info.get('application_process', 'N/A')}")
                         
+                        # Generate Embedding button
+                        if st.button(f"🧠 Generate Embedding for Document {idx}", key=f"gen_emb_{doc['_id']}"):
+                            try:
+                                if st.session_state.get('milvus_connected'):
+                                    summary_text = info.get('summary', '') or ''
+                                    if not summary_text:
+                                        st.warning("⚠️ No summary available to generate embedding.")
+                                    else:
+                                        with st.spinner("Generating embedding and inserting into Milvus..."):
+                                            emb = get_embedding(summary_text)
+                                            pk = st.session_state.milvus_handler.insert_embedding(str(doc['_id']), summary_text, emb)
+                                        st.success(f"✓ Embedding inserted into Milvus (pk={pk})")
+                                else:
+                                    st.warning(f"⚠️ Milvus not connected: {st.session_state.get('milvus_error')}")
+                            except Exception as e:
+                                logger.exception("Failed to generate/insert embedding for doc %s: %s", doc.get('_id'), e)
+                                st.error("❌ Failed to generate embedding. Check logs.")
+
                         # Delete button
                         if st.button(f"🗑️ Delete Document {idx}", key=f"delete_{doc['_id']}"):
                             try:
