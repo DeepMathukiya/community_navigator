@@ -8,6 +8,7 @@ from chatgpt_extractor import extract_information_from_pdf, validate_extracted_d
 from mongodb_handler import MongoDBHandler
 from milvus_handler import MilvusHandler
 from embedding_utils import get_embedding
+from rag_chatbot import RAGChatbot
 import json
 from datetime import datetime
 from logger_config import get_logger
@@ -66,18 +67,37 @@ if 'db_handler' not in st.session_state:
 # Initialize Milvus handler (optional)
 if 'milvus_handler' not in st.session_state:
     try:
+        logger.info("Initializing Milvus handler with collection 'pdf_embeddings'...")
         st.session_state.milvus_handler = MilvusHandler()
         st.session_state.milvus_connected = True
+        logger.info("Milvus handler initialized successfully. Collection 'pdf_embeddings' is ready.")
     except Exception as e:
         st.session_state.milvus_connected = False
         st.session_state.milvus_error = str(e)
         logger.warning("Milvus not available: %s", st.session_state.milvus_error)
 
+# Initialize RAG Chatbot
+if 'rag_chatbot' not in st.session_state:
+    try:
+        st.session_state.rag_chatbot = RAGChatbot(
+            milvus_handler=st.session_state.milvus_handler if st.session_state.get('milvus_connected') else None,
+            mongo_handler=st.session_state.db_handler if st.session_state.get('db_connected') else None
+        )
+        st.session_state.chatbot_ready = True
+    except Exception as e:
+        st.session_state.chatbot_ready = False
+        st.session_state.chatbot_error = str(e)
+        logger.warning("RAG Chatbot initialization failed: %s", e)
+
+# Initialize chat message history
+if 'chat_messages' not in st.session_state:
+    st.session_state.chat_messages = []
+
 # Sidebar
 st.sidebar.title("📋 Navigation")
 page = st.sidebar.radio(
     "Select a page:",
-    ["Upload & Extract", "View Extracted Data", "Database Statistics"]
+    ["Upload & Extract", "View Extracted Data", "Database Statistics", "💬 Chatbot"]
 )
 
 st.sidebar.markdown("---")
@@ -384,6 +404,128 @@ elif page == "Database Statistics":
             logger.exception("Error loading database statistics")
     else:
         st.warning("⚠️ Database not connected. Cannot load statistics.")
+
+elif page == "💬 Chatbot":
+    st.header("💬 Document-Aware Chatbot")
+    
+    if not st.session_state.get('chatbot_ready'):
+        st.error(f"❌ Chatbot not available: {st.session_state.get('chatbot_error', 'Unknown error')}")
+        st.info("Ensure Milvus and MongoDB are running and connected.")
+    else:
+        # Check Milvus collection status
+        if st.session_state.get('milvus_connected'):
+            try:
+                collection_status = st.session_state.milvus_handler.get_collection_status()
+                num_embeddings = collection_status.get('num_entities', 0)
+                
+                if num_embeddings == 0:
+                    st.warning("⚠️ **No embeddings found in Milvus collection!**")
+                    st.info("""
+                    To use the chatbot, you need to:
+                    1. Go to **"View Extracted Data"** page
+                    2. For each document, click **"🧠 Generate Embedding for Document X"**
+                    3. Return here and ask your questions
+                    
+                    This generates semantic embeddings that allow the chatbot to find relevant documents.
+                    """)
+                    st.markdown("---")
+                else:
+                    st.success(f"✅ Milvus collection has **{num_embeddings}** embeddings ready")
+                    st.markdown("---")
+            except Exception as e:
+                logger.warning("Could not get collection status: %s", e)
+        
+        st.markdown("""
+        Ask questions about your uploaded PDF documents. The chatbot will:
+        1. Search for related documents using semantic similarity
+        2. Generate an answer using NVIDIA Nemotron AI
+        3. Provide citations to the source documents
+        """)
+        
+        st.markdown("---")
+        
+        # Display chat history
+        with st.container():
+            if st.session_state.chat_messages:
+                for msg in st.session_state.chat_messages:
+                    if msg["role"] == "user":
+                        st.chat_message("user").write(msg["content"])
+                    else:
+                        st.chat_message("assistant").write(msg["content"])
+        
+        # Input for new query
+        st.markdown("---")
+        query = st.text_input(
+            "Ask a question about your documents:",
+            placeholder="E.g., What are the eligibility criteria mentioned in the documents?",
+            key="chat_input"
+        )
+        
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            search_button = st.button("🔍 Search & Answer", use_container_width=True, type="primary")
+        with col2:
+            clear_button = st.button("🗑️ Clear Chat", use_container_width=True)
+        
+        if clear_button:
+            st.session_state.chat_messages = []
+            st.rerun()
+        
+        if search_button and query.strip():
+            # Add user message to history
+            st.session_state.chat_messages.append({
+                "role": "user",
+                "content": query
+            })
+            
+            # Show thinking state
+            with st.spinner("🔍 Searching documents and generating answer..."):
+                try:
+                    # Get answer from RAG chatbot
+                    result = st.session_state.rag_chatbot.chat(query, top_k=5)
+                    
+                    # Format response with citations
+                    answer_text = result.get("answer", "No answer generated")
+                    citations = result.get("citations", [])
+                    related_docs = result.get("related_documents", [])
+                    
+                    # Build formatted response
+                    formatted_response = f"{answer_text}\n"
+                    
+                    if citations:
+                        formatted_response += "\n---\n**📚 Citations:**\n"
+                        for citation in citations:
+                            doc_num = citation.get("document_number", "?")
+                            filename = citation.get("filename", "Unknown")
+                            doc_id = citation.get("doc_id", "Unknown")
+                            formatted_response += f"\n[Document {doc_num}] {filename}"
+                    
+                    if related_docs and not citations:
+                        formatted_response += "\n---\n**📚 Related Documents:**\n"
+                        for i, doc in enumerate(related_docs, 1):
+                            filename = doc.get("filename", "Unknown")
+                            score = doc.get("similarity_score", 0)
+                            formatted_response += f"\n- {filename} (relevance: {score:.1%})"
+                    
+                    # Add assistant response to history
+                    st.session_state.chat_messages.append({
+                        "role": "assistant",
+                        "content": formatted_response
+                    })
+                    
+                    # Display the response
+                    st.chat_message("assistant").markdown(formatted_response)
+                    
+                except Exception as e:
+                    error_msg = f"❌ Error: {str(e)}"
+                    st.error(error_msg)
+                    logger.exception("Error in chatbot query: %s", e)
+                    
+                    # Add error to history
+                    st.session_state.chat_messages.append({
+                        "role": "assistant",
+                        "content": error_msg
+                    })
 
 # Footer
 # st.markdown("---")
