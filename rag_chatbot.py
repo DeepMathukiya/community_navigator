@@ -149,16 +149,65 @@ class RAGChatbot:
                 logger.error("NVIDIA_API_KEY not configured")
                 raise Exception("NVIDIA_API_KEY not configured")
             
-            # Build context from related documents
+            # Build context from related documents with full extracted information
             doc_context = ""
             for i, doc in enumerate(related_docs, 1):
                 doc_id = doc.get("doc_id", "Unknown")
-                summary = doc.get("summary", "No summary available")
                 score = doc.get("similarity_score", 0)
                 filename = doc.get("filename", "Unknown file")
-                doc_context += f"\n[Document {i}] ({filename} - ID: {doc_id}, Relevance: {score:.2%})\n"
-                doc_context += f"Summary: {summary}\n"
-                logger.debug("Added document %d to context: %s (score: %.4f)", i, filename, score)
+                
+                # Get full extracted information from MongoDB
+                full_info = doc.get("full_info", {})
+                
+                # Build comprehensive document context
+                doc_context += f"\n[{filename}] \n"
+                doc_context += f"Document ID: {doc_id} | Relevance Score: {score:.2%}\n"
+                doc_context += "-" * 60 + "\n"
+                
+                # Add all extracted information
+                if full_info:
+                    if full_info.get("summary"):
+                        doc_context += f"Summary: {full_info.get('summary')}\n\n"
+                    
+                    if full_info.get("eligibility"):
+                        eligibility = full_info.get("eligibility")
+                        if isinstance(eligibility, list):
+                            doc_context += f"Eligibility:\n"
+                            for item in eligibility:
+                                doc_context += f"  - {item}\n"
+                        else:
+                            doc_context += f"Eligibility: {eligibility}\n"
+                        doc_context += "\n"
+                    
+                    if full_info.get("benefits"):
+                        benefits = full_info.get("benefits")
+                        if isinstance(benefits, list):
+                            doc_context += f"Benefits:\n"
+                            for item in benefits:
+                                doc_context += f"  - {item}\n"
+                        else:
+                            doc_context += f"Benefits: {benefits}\n"
+                        doc_context += "\n"
+                    
+                    if full_info.get("apply_date"):
+                        doc_context += f"Application Date: {full_info.get('apply_date')}\n\n"
+                    
+                    if full_info.get("application_process"):
+                        process = full_info.get("application_process")
+                        if isinstance(process, list):
+                            doc_context += f"Application Process:\n"
+                            for idx, step in enumerate(process, 1):
+                                doc_context += f"  {idx}. {step}\n"
+                        else:
+                            doc_context += f"Application Process: {process}\n"
+                        doc_context += "\n"
+                else:
+                    # Fallback to summary if full_info not available
+                    summary = doc.get("summary", "No summary available")
+                    doc_context += f"Summary: {summary}\n\n"
+                
+                logger.info("Added document %d to context: %s (score: %.4f, info_size: %d)", 
+                           i, filename, score, len(str(full_info)))
             
             # Check if we have any documents
             has_documents = bool(doc_context.strip())
@@ -176,7 +225,7 @@ Since no related documents are available, please provide a helpful general answe
 Please provide a helpful response:"""
             else:
                 # Prompt for when documents are available
-                prompt = f"""You are a helpful assistant answering user queries based on retrieved document summaries.
+                prompt = f"""You are a helpful assistant answering user queries based on detailed document information.
 
 User Query: {query}
 
@@ -185,10 +234,12 @@ Related Documents:
 
 Instructions:
 1. Answer the user's query based ONLY on the information from the related documents above
-2. If the answer is found in the documents, cite the specific document(s) by their number [Document X]
-3. If information is not available in the documents, clearly state "Based on the provided documents, this information is not available"
-4. Keep your answer concise and well-structured
-5. Always include citations in format: [Document X] for each claim
+2. Use the document sections (Summary, Eligibility, Benefits, Application Date, Application Process) to provide comprehensive answers
+3. If the answer is found in the documents, cite the specific document(s) by their number [Document X]
+4. If information is not available in the documents, clearly state "Based on the provided documents, this information is not available"
+5. Keep your answer concise and well-structured
+6. Always include citations in format: [Document X] for each claim
+7. When discussing eligibility or benefits, use the specific items from the documents
 
 Please provide your answer with proper citations:"""
             
